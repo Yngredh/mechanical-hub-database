@@ -65,3 +65,8 @@ output "private_subnet_ids" {
   description = "Subnets privadas efetivamente usadas no DB subnet group."
   value       = local.private_subnet_ids
 }
+
+output "eks_cluster_name" {
+  description = "Nome do cluster EKS (state do mechanical-hub-infra), usado para rodar sql/auth-database-role.sql via Job no cluster."
+  value       = try(local.infra_outputs.eks_cluster_name, null)
+}

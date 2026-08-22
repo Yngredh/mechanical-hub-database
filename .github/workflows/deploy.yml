@@ -41,6 +41,7 @@ jobs:
       rds-endpoint: ${{ steps.tf-outputs.outputs.rds_endpoint }}
       rds-port: ${{ steps.tf-outputs.outputs.rds_port }}
       rds-db-name: ${{ steps.tf-outputs.outputs.rds_db_name }}
+      eks-cluster-name: ${{ steps.tf-outputs.outputs.eks_cluster_name }}
 
     steps:
       - uses: actions/checkout@v4
@@ -102,6 +103,7 @@ jobs:
           echo "rds_endpoint=$(terraform output -raw rds_endpoint)" >> $GITHUB_OUTPUT
           echo "rds_port=$(terraform output -raw rds_port)" >> $GITHUB_OUTPUT
           echo "rds_db_name=$(terraform output -raw rds_db_name)" >> $GITHUB_OUTPUT
+          echo "eks_cluster_name=$(terraform output -raw eks_cluster_name)" >> $GITHUB_OUTPUT
 
       - name: Resumo
         working-directory: ${{ env.TF_DIR }}
@@ -134,6 +136,16 @@ jobs:
   # "criar_role_de_autenticacao" em Actions -> Deploy -> Run workflow.
   #
   # O script e idempotente: em execucoes seguintes apenas atualiza a senha.
+  #
+  # O psql NAO roda direto neste runner: o RDS e privado (publicly_accessible
+  # = false, o security group so libera as subnets privadas — ADR-0002) e o
+  # runner hospedado do GitHub Actions esta na internet publica, entao a
+  # conexao sempre da "Connection timed out" na 5432, senha certa ou nao. Em
+  # vez de abrir o banco para a internet (contradiria a decisao do ADR-0002 e
+  # os IPs dos runners do GitHub mudam demais para colocar em allowlist), o
+  # script roda como um Job de curta duracao dentro do EKS, que ja esta na
+  # mesma rede privada que o RDS aceita — a mesma rede de onde o mechanical-hub
+  # ja consegue conectar hoje.
   auth-role:
     name: Criar role de autenticacao no banco
     runs-on: ubuntu-latest
@@ -142,11 +154,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Instalar cliente PostgreSQL
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends postgresql-client
 
       - name: Conferir secrets obrigatorios
         env:
@@ -161,40 +168,138 @@ jobs:
             exit 1
           fi
 
-      - name: Executar sql/auth-database-role.sql
+      - name: Configurar credenciais AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configurar kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --name ${{ needs.deploy.outputs.eks-cluster-name }} \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Executar sql/auth-database-role.sql via Job no EKS
         env:
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          AUTH_DB_PASSWORD: ${{ secrets.AUTH_DB_PASSWORD }}
           PGHOST: ${{ needs.deploy.outputs.rds-endpoint }}
           PGPORT: ${{ needs.deploy.outputs.rds-port }}
           PGDATABASE: ${{ needs.deploy.outputs.rds-db-name }}
-          PGUSER: mechanical_hub
-          PGPASSWORD: ${{ secrets.DB_PASSWORD }}
-          PGSSLMODE: require
-          # Senha da role de autenticacao — a mesma que o mechanical-hub-auth
-          # recebe em TF_VAR_database_password.
-          AUTH_DB_PASSWORD: ${{ secrets.AUTH_DB_PASSWORD }}
         run: |
-          echo "Alvo: ${PGHOST}:${PGPORT}/${PGDATABASE}"
+          set -euo pipefail
+          NAMESPACE=production
+          echo "Alvo: ${PGHOST}:${PGPORT}/${PGDATABASE} (via Job no namespace ${NAMESPACE})"
 
-          # Falha cedo e com mensagem util se as migrations ainda nao rodaram.
-          faltantes=$(psql -tAc "
-            SELECT string_agg(t, ', ')
-              FROM unnest(ARRAY['users','profiles']) AS t
-             WHERE to_regclass('public.' || t) IS NULL
-          ")
-          if [ -n "${faltantes}" ]; then
-            echo "::error::Tabela(s) inexistente(s): ${faltantes}. Rode as migrations Flyway do mechanical-hub antes deste job."
+          # Idempotente mesmo se este job rodar antes do primeiro deploy do
+          # mechanical-hub (namespace ainda nao existiria).
+          kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+          # Limpa uma execucao anterior: Job e imutavel apos criado, um re-run
+          # sem isso falha com "already exists".
+          kubectl delete job auth-role-job -n "$NAMESPACE" --ignore-not-found
+          kubectl delete secret auth-role-job-secret -n "$NAMESPACE" --ignore-not-found
+          kubectl delete configmap auth-role-sql -n "$NAMESPACE" --ignore-not-found
+
+          kubectl create configmap auth-role-sql \
+            --namespace "$NAMESPACE" \
+            --from-file=auth-database-role.sql=sql/auth-database-role.sql
+
+          # Secret efemero: some no step de limpeza abaixo, esteja o job em
+          # sucesso ou falha.
+          kubectl create secret generic auth-role-job-secret \
+            --namespace "$NAMESPACE" \
+            --from-literal=db-password="${DB_PASSWORD}" \
+            --from-literal=auth-db-password="${AUTH_DB_PASSWORD}"
+
+          cat <<EOF | kubectl apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: auth-role-job
+            namespace: ${NAMESPACE}
+          spec:
+            backoffLimit: 0
+            ttlSecondsAfterFinished: 300
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: psql
+                    # Mirror da AWS para o postgres oficial: evita o rate limit
+                    # do Docker Hub para pulls anonimos.
+                    image: public.ecr.aws/docker/library/postgres:16-alpine
+                    command: ["sh", "-c"]
+                    args:
+                      - |
+                        set -e
+                        faltantes=\$(psql -tAc "
+                          SELECT string_agg(t, ', ')
+                            FROM unnest(ARRAY['users','profiles']) AS t
+                           WHERE to_regclass('public.' || t) IS NULL
+                        ")
+                        if [ -n "\$faltantes" ]; then
+                          echo "Tabela(s) inexistente(s): \$faltantes. Rode as migrations Flyway do mechanical-hub antes deste job." >&2
+                          exit 1
+                        fi
+                        if ! psql -tAc "SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='document_number'" | grep -q 1; then
+                          echo "users.document_number nao existe. As migrations V18..V20 ainda nao foram aplicadas." >&2
+                          exit 1
+                        fi
+                        psql -v ON_ERROR_STOP=1 -v auth_password="\$AUTH_DB_PASSWORD" -f /sql/auth-database-role.sql
+                    env:
+                      - name: PGHOST
+                        value: "${PGHOST}"
+                      - name: PGPORT
+                        value: "${PGPORT}"
+                      - name: PGDATABASE
+                        value: "${PGDATABASE}"
+                      - name: PGUSER
+                        value: "mechanical_hub"
+                      - name: PGSSLMODE
+                        value: "require"
+                      - name: PGPASSWORD
+                        valueFrom:
+                          secretKeyRef:
+                            name: auth-role-job-secret
+                            key: db-password
+                      - name: AUTH_DB_PASSWORD
+                        valueFrom:
+                          secretKeyRef:
+                            name: auth-role-job-secret
+                            key: auth-db-password
+                    volumeMounts:
+                      - name: sql-script
+                        mountPath: /sql
+                volumes:
+                  - name: sql-script
+                    configMap:
+                      name: auth-role-sql
+          EOF
+
+          set +e
+          kubectl wait --for=condition=complete --timeout=180s "job/auth-role-job" -n "$NAMESPACE"
+          WAIT_STATUS=$?
+          set -e
+
+          echo "=== Logs do Job ==="
+          kubectl logs job/auth-role-job -n "$NAMESPACE" --tail=200 || true
+
+          if [ "$WAIT_STATUS" -ne 0 ]; then
+            echo "::error::Job auth-role-job nao completou com sucesso. Ver logs acima."
             exit 1
           fi
 
-          if ! psql -tAc "SELECT 1 FROM information_schema.columns \
-              WHERE table_name='users' AND column_name='document_number'" | grep -q 1; then
-            echo "::error::users.document_number nao existe. As migrations V18..V20 ainda nao foram aplicadas."
-            exit 1
-          fi
-
-          psql -v ON_ERROR_STOP=1 \
-               -v auth_password="${AUTH_DB_PASSWORD}" \
-               -f sql/auth-database-role.sql
+      - name: Limpar recursos do Job
+        if: always()
+        run: |
+          NAMESPACE=production
+          kubectl delete job auth-role-job -n "$NAMESPACE" --ignore-not-found
+          kubectl delete secret auth-role-job-secret -n "$NAMESPACE" --ignore-not-found
+          kubectl delete configmap auth-role-sql -n "$NAMESPACE" --ignore-not-found
 
       - name: Resumo
         run: |
