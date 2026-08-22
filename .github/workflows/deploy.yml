@@ -1,0 +1,209 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Ambiente alvo
+        required: true
+        default: production
+        type: choice
+        options: [production, staging]
+      criar_role_de_autenticacao:
+        description: >-
+          Executar sql/auth-database-role.sql apos o apply.
+          So marque depois que as migrations Flyway V18..V20 do mechanical-hub
+          tiverem rodado — elas criam users.document_number.
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  TF_VERSION: 1.7.5
+  TF_DIR: infra
+
+jobs:
+  deploy:
+    name: Provisionar banco de dados
+    runs-on: ubuntu-latest
+
+    outputs:
+      rds-endpoint: ${{ steps.tf-outputs.outputs.rds_endpoint }}
+      rds-port: ${{ steps.tf-outputs.outputs.rds_port }}
+      rds-db-name: ${{ steps.tf-outputs.outputs.rds_db_name }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar credenciais AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Definir variaveis de state
+        id: state
+        run: |
+          BUCKET="mechanical-hub-tfstate-${{ secrets.AWS_ACCOUNT_ID }}"
+          echo "bucket=${BUCKET}" >> $GITHUB_OUTPUT
+          echo "environment=${{ github.event.inputs.environment || 'production' }}" >> $GITHUB_OUTPUT
+
+      - name: Garantir bucket de state
+        run: |
+          aws s3api create-bucket \
+            --bucket ${{ steps.state.outputs.bucket }} \
+            --region ${{ env.AWS_REGION }} || true
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ steps.state.outputs.bucket }}" \
+            -backend-config="key=mechanical-hub-database/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}"
+
+      - name: Terraform validate
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform validate
+
+      - name: Terraform plan
+        working-directory: ${{ env.TF_DIR }}
+        env:
+          TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+          TF_VAR_infra_state_bucket: ${{ steps.state.outputs.bucket }}
+          TF_VAR_environment: ${{ steps.state.outputs.environment }}
+        run: terraform plan -input=false -out=tfplan
+
+      - name: Terraform apply
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform apply -input=false -auto-approve tfplan
+
+      - name: Publicar outputs do contrato
+        id: tf-outputs
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          echo "rds_endpoint=$(terraform output -raw rds_endpoint)" >> $GITHUB_OUTPUT
+          echo "rds_port=$(terraform output -raw rds_port)" >> $GITHUB_OUTPUT
+          echo "rds_db_name=$(terraform output -raw rds_db_name)" >> $GITHUB_OUTPUT
+
+      - name: Resumo
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          {
+            echo "### Banco provisionado"
+            echo ""
+            echo "| Output | Valor |"
+            echo "| --- | --- |"
+            echo "| rds_endpoint | \`$(terraform output -raw rds_endpoint)\` |"
+            echo "| rds_port | \`$(terraform output -raw rds_port)\` |"
+            echo "| rds_db_name | \`$(terraform output -raw rds_db_name)\` |"
+            echo ""
+            echo "State: \`s3://${{ steps.state.outputs.bucket }}/mechanical-hub-database/terraform.tfstate\`"
+            echo ""
+            echo "Consumidores (ADR-0002): \`mechanical-hub-auth\` e o pipeline de deploy de \`mechanical-hub\`."
+          } >> $GITHUB_STEP_SUMMARY
+
+  # ===========================================================================
+  # Role de banco da autenticacao — opcional, sob demanda
+  # ===========================================================================
+  #
+  # ADR-0002 atribui a este repositorio a definicao do usuario de banco com
+  # privilegio minimo usado pela autenticacao. O script correspondente esta em
+  # sql/auth-database-role.sql.
+  #
+  # NAO roda no push: depende das migrations Flyway V18, V19 e V20 do
+  # `mechanical-hub`, que criam e populam `users.document_number`. Rodar antes
+  # delas falha no GRANT por coluna. Por isso o job so e acionado marcando
+  # "criar_role_de_autenticacao" em Actions -> Deploy -> Run workflow.
+  #
+  # O script e idempotente: em execucoes seguintes apenas atualiza a senha.
+  auth-role:
+    name: Criar role de autenticacao no banco
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: github.event_name == 'workflow_dispatch' && inputs.criar_role_de_autenticacao
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar cliente PostgreSQL
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends postgresql-client
+
+      - name: Conferir secrets obrigatorios
+        env:
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          AUTH_DB_PASSWORD: ${{ secrets.AUTH_DB_PASSWORD }}
+        run: |
+          faltando=""
+          [ -z "${DB_PASSWORD}" ]      && faltando="${faltando} DB_PASSWORD"
+          [ -z "${AUTH_DB_PASSWORD}" ] && faltando="${faltando} AUTH_DB_PASSWORD"
+          if [ -n "${faltando}" ]; then
+            echo "::error::Secret(s) ausente(s):${faltando}"
+            exit 1
+          fi
+
+      - name: Executar sql/auth-database-role.sql
+        env:
+          PGHOST: ${{ needs.deploy.outputs.rds-endpoint }}
+          PGPORT: ${{ needs.deploy.outputs.rds-port }}
+          PGDATABASE: ${{ needs.deploy.outputs.rds-db-name }}
+          PGUSER: mechanical_hub
+          PGPASSWORD: ${{ secrets.DB_PASSWORD }}
+          PGSSLMODE: require
+          # Senha da role de autenticacao — a mesma que o mechanical-hub-auth
+          # recebe em TF_VAR_database_password.
+          AUTH_DB_PASSWORD: ${{ secrets.AUTH_DB_PASSWORD }}
+        run: |
+          echo "Alvo: ${PGHOST}:${PGPORT}/${PGDATABASE}"
+
+          # Falha cedo e com mensagem util se as migrations ainda nao rodaram.
+          faltantes=$(psql -tAc "
+            SELECT string_agg(t, ', ')
+              FROM unnest(ARRAY['users','profiles']) AS t
+             WHERE to_regclass('public.' || t) IS NULL
+          ")
+          if [ -n "${faltantes}" ]; then
+            echo "::error::Tabela(s) inexistente(s): ${faltantes}. Rode as migrations Flyway do mechanical-hub antes deste job."
+            exit 1
+          fi
+
+          if ! psql -tAc "SELECT 1 FROM information_schema.columns \
+              WHERE table_name='users' AND column_name='document_number'" | grep -q 1; then
+            echo "::error::users.document_number nao existe. As migrations V18..V20 ainda nao foram aplicadas."
+            exit 1
+          fi
+
+          psql -v ON_ERROR_STOP=1 \
+               -v auth_password="${AUTH_DB_PASSWORD}" \
+               -f sql/auth-database-role.sql
+
+      - name: Resumo
+        run: |
+          {
+            echo "### Role de autenticacao"
+            echo ""
+            echo "\`mechanical_hub_auth\` criada ou atualizada em \`${{ needs.deploy.outputs.rds-db-name }}\`."
+            echo ""
+            echo "Privilegio: \`SELECT\` em \`profiles\` e nas seis colunas de \`users\` usadas pelo login. Nada mais."
+            echo ""
+            echo "Proximo passo: deploy do \`mechanical-hub-auth\` com \`TF_VAR_database_password\` igual ao secret \`AUTH_DB_PASSWORD\`."
+          } >> $GITHUB_STEP_SUMMARY
