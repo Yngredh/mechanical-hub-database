@@ -15,7 +15,6 @@ Segundo a ADR-0002, o banco tem ciclo de vida próprio e é o recurso de maior c
 - Instância RDS PostgreSQL.
 - DB subnet group.
 - Security group do banco e suas regras de ingress.
-- RDS Proxy, quando adotado (ver [Decisões de arquitetura](#decisões-de-arquitetura)).
 - Definição do usuário/role de banco com privilégio mínimo usado pela autenticação (`sql/auth-database-role.sql`).
 
 **Não pertence:**
