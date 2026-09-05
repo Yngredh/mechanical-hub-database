@@ -63,6 +63,12 @@ mechanical-hub-infra → mechanical-hub-database → mechanical-hub-auth → mec
 
 Cada repositório lê os valores de que precisa via `terraform_remote_state`, nunca por hardcode de IDs ou endpoints.
 
+### Arquitetura interna deste repositório
+
+O diagrama acima mostra a ordem entre repositórios; este mostra apenas os recursos que **este** repositório provisiona (módulo `rds`) e quem os consome:
+
+![Diagrama de componentes](mechanical-hub-database-diagram.png)
+
 ### Aplicar fora de ordem falha — de propósito
 
 Este repositório resolve `vpc_id`, `private_subnet_ids` e `private_subnet_cidrs` a partir do state do `mechanical-hub-infra`. Se esse state não existir e nenhum override for informado, o `plan` **falha na precondição de rede**, antes de qualquer recurso ser criado:
