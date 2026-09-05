@@ -15,7 +15,6 @@ Segundo a ADR-0002, o banco tem ciclo de vida próprio e é o recurso de maior c
 - Instância RDS PostgreSQL.
 - DB subnet group.
 - Security group do banco e suas regras de ingress.
-- RDS Proxy, quando adotado (ver [Decisões de arquitetura](#decisões-de-arquitetura)).
 - Definição do usuário/role de banco com privilégio mínimo usado pela autenticação (`sql/auth-database-role.sql`).
 
 **Não pertence:**
@@ -63,6 +62,12 @@ mechanical-hub-infra → mechanical-hub-database → mechanical-hub-auth → mec
 ```
 
 Cada repositório lê os valores de que precisa via `terraform_remote_state`, nunca por hardcode de IDs ou endpoints.
+
+### Arquitetura interna deste repositório
+
+O diagrama acima mostra a ordem entre repositórios; este mostra apenas os recursos que **este** repositório provisiona (módulo `rds`) e quem os consome:
+
+![Diagrama de componentes](mechanical-hub-database-diagram.png)
 
 ### Aplicar fora de ordem falha — de propósito
 
