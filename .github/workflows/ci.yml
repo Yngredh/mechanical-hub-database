@@ -42,17 +42,25 @@ jobs:
         working-directory: ${{ env.TF_DIR }}
         run: terraform validate
 
-      - name: Testes unitarios — validacao de regiao
-        working-directory: ${{ env.TF_DIR }}
-        run: terraform test -filter=tests/unit/region_unit.tftest.hcl
+      - name: Terraform validate — modulo mongodb
+        working-directory: ${{ env.TF_DIR }}/modules/mongodb
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
 
-      - name: Testes unitarios — resolucao de rede
+      # `terraform test` so procura arquivos diretamente em tests/; os testes
+      # ficam em subpastas, por isso o -test-directory (sem ele o comando
+      # termina com "0 passed" e nao testa nada). O init precisa do mesmo
+      # parametro para instalar os modulos referenciados pelos runs.
+      #
+      # Cobre: regiao, resolucao de rede, modulo rds, bancos por servico e
+      # contrato de outputs (databases_unit) e o StatefulSet do MongoDB
+      # (mongodb_unit). Todos com mock_provider, sem AWS nem cluster.
+      - name: Testes unitarios
         working-directory: ${{ env.TF_DIR }}
-        run: terraform test -filter=tests/unit/network_unit.tftest.hcl
-
-      - name: Testes unitarios — modulo RDS
-        working-directory: ${{ env.TF_DIR }}
-        run: terraform test -filter=tests/unit/rds_unit.tftest.hcl
+        run: |
+          terraform init -backend=false -input=false -test-directory=tests/unit
+          terraform test -test-directory=tests/unit -verbose
 
   integration:
     name: Testes de integracao (LocalStack)
@@ -80,13 +88,11 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
-      - name: Terraform init (backend local — sem AWS)
+      - name: Teste de integracao dos bancos por servico
         working-directory: ${{ env.TF_DIR }}
-        run: terraform init -backend=false -input=false
-
-      - name: Teste de integracao do modulo RDS
-        working-directory: ${{ env.TF_DIR }}
-        run: terraform test -filter=tests/integration/rds_integration.tftest.hcl
+        run: |
+          terraform init -backend=false -input=false -test-directory=tests/integration
+          terraform test -test-directory=tests/integration -verbose
 
   plan:
     name: Terraform plan
@@ -118,9 +124,20 @@ jobs:
             -backend-config="key=mechanical-hub-database/terraform.tfstate" \
             -backend-config="region=${{ vars.AWS_REGION || 'us-east-1' }}"
 
+      # O provider kubernetes (MongoDB) usa `aws eks get-token` com estas
+      # mesmas credenciais; o cluster vem do state do mechanical-hub-infra.
       - name: Terraform plan
         working-directory: ${{ env.TF_DIR }}
         env:
-          TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+          DB_PASSWORD_ORDERS: ${{ secrets.DB_PASSWORD_ORDERS }}
+          DB_PASSWORD_STOCK: ${{ secrets.DB_PASSWORD_STOCK }}
+          DB_PASSWORD_BILLING: ${{ secrets.DB_PASSWORD_BILLING }}
           TF_VAR_infra_state_bucket: mechanical-hub-tfstate-${{ secrets.AWS_ACCOUNT_ID }}
-        run: terraform plan -input=false -no-color
+          TF_VAR_aws_region: ${{ vars.AWS_REGION || 'us-east-1' }}
+        run: |
+          export TF_VAR_db_passwords=$(jq -cn \
+            --arg orders "$DB_PASSWORD_ORDERS" \
+            --arg stock "$DB_PASSWORD_STOCK" \
+            --arg billing "$DB_PASSWORD_BILLING" \
+            '{orders: $orders, stock: $stock, billing: $billing}')
+          terraform plan -input=false -no-color

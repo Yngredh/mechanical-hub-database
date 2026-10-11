@@ -11,11 +11,18 @@ on:
         default: production
         type: choice
         options: [production, staging]
-      criar_role_de_autenticacao:
+      mongodb_persistencia:
         description: >-
-          Executar sql/auth-database-role.sql apos o apply.
-          So marque depois que as migrations Flyway V18..V20 do mechanical-hub
-          tiverem rodado — elas criam users.document_number.
+          MongoDB em PVC (EBS gp3). Desmarque se o driver EBS CSI nao
+          funcionar no Lab — cai para emptyDir.
+        required: false
+        default: true
+        type: boolean
+      criar_usuarios_e_role:
+        description: >-
+          Executar sql/service-user.sql nas 3 instancias e
+          sql/auth-database-role.sql na do orders apos o apply. Necessario
+          antes do primeiro deploy dos servicos (e a cada recriacao dos RDS).
         required: false
         default: false
         type: boolean
@@ -34,17 +41,38 @@ env:
 
 jobs:
   deploy:
-    name: Provisionar banco de dados
+    name: Provisionar bancos de dados
     runs-on: ubuntu-latest
 
+    # Valores do contrato (secao 3 da spec) para quem consome este workflow.
+    # `databases` e `auth_database` saem como JSON compacto.
     outputs:
-      rds-endpoint: ${{ steps.tf-outputs.outputs.rds_endpoint }}
-      rds-port: ${{ steps.tf-outputs.outputs.rds_port }}
-      rds-db-name: ${{ steps.tf-outputs.outputs.rds_db_name }}
+      databases: ${{ steps.tf-outputs.outputs.databases }}
+      auth-database: ${{ steps.tf-outputs.outputs.auth_database }}
+      mongodb-host: ${{ steps.tf-outputs.outputs.mongodb_host }}
+      mongodb-port: ${{ steps.tf-outputs.outputs.mongodb_port }}
+      mongodb-replica-set: ${{ steps.tf-outputs.outputs.mongodb_replica_set }}
+      mongodb-database: ${{ steps.tf-outputs.outputs.mongodb_database }}
+      mongodb-secret-name: ${{ steps.tf-outputs.outputs.mongodb_secret_name }}
       eks-cluster-name: ${{ steps.tf-outputs.outputs.eks_cluster_name }}
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Conferir secrets obrigatorios
+        env:
+          DB_PASSWORD_ORDERS: ${{ secrets.DB_PASSWORD_ORDERS }}
+          DB_PASSWORD_STOCK: ${{ secrets.DB_PASSWORD_STOCK }}
+          DB_PASSWORD_BILLING: ${{ secrets.DB_PASSWORD_BILLING }}
+        run: |
+          faltando=""
+          for nome in DB_PASSWORD_ORDERS DB_PASSWORD_STOCK DB_PASSWORD_BILLING; do
+            if [ -z "${!nome}" ]; then faltando="${faltando} ${nome}"; fi
+          done
+          if [ -n "${faltando}" ]; then
+            echo "::error::Secret(s) ausente(s):${faltando}"
+            exit 1
+          fi
 
       - name: Configurar credenciais AWS
         uses: aws-actions/configure-aws-credentials@v4
@@ -65,12 +93,30 @@ jobs:
           BUCKET="mechanical-hub-tfstate-${{ secrets.AWS_ACCOUNT_ID }}"
           echo "bucket=${BUCKET}" >> $GITHUB_OUTPUT
           echo "environment=${{ github.event.inputs.environment || 'production' }}" >> $GITHUB_OUTPUT
+          # No push nao ha inputs: persistencia ligada (padrao da variavel).
+          echo "mongodb_persistence=${{ github.event_name != 'workflow_dispatch' || inputs.mongodb_persistencia }}" >> $GITHUB_OUTPUT
 
       - name: Garantir bucket de state
         run: |
           aws s3api create-bucket \
             --bucket ${{ steps.state.outputs.bucket }} \
             --region ${{ env.AWS_REGION }} || true
+
+      # O provider kubernetes (MongoDB) se autentica com `aws eks get-token`
+      # sobre o cluster lido do state do mechanical-hub-infra. O kubeconfig
+      # aqui serve para falhar cedo, com mensagem clara, se o cluster nao
+      # existir ou nao responder — e deixa o kubectl pronto para diagnostico.
+      - name: Configurar kubeconfig do cluster do infra
+        run: |
+          set -euo pipefail
+          CLUSTER=$(aws s3 cp "s3://${{ steps.state.outputs.bucket }}/mechanical-hub-infra/terraform.tfstate" - \
+            | jq -r '.outputs.eks_cluster_name.value // empty')
+          if [ -z "$CLUSTER" ]; then
+            echo "::error::eks_cluster_name nao encontrado no state do mechanical-hub-infra. Aplique o infra antes deste repositorio."
+            exit 1
+          fi
+          aws eks update-kubeconfig --name "$CLUSTER" --region ${{ env.AWS_REGION }}
+          kubectl get nodes -o wide
 
       - name: Terraform init
         working-directory: ${{ env.TF_DIR }}
@@ -87,10 +133,21 @@ jobs:
       - name: Terraform plan
         working-directory: ${{ env.TF_DIR }}
         env:
-          TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+          DB_PASSWORD_ORDERS: ${{ secrets.DB_PASSWORD_ORDERS }}
+          DB_PASSWORD_STOCK: ${{ secrets.DB_PASSWORD_STOCK }}
+          DB_PASSWORD_BILLING: ${{ secrets.DB_PASSWORD_BILLING }}
           TF_VAR_infra_state_bucket: ${{ steps.state.outputs.bucket }}
           TF_VAR_environment: ${{ steps.state.outputs.environment }}
-        run: terraform plan -input=false -out=tfplan
+          TF_VAR_mongodb_persistence_enabled: ${{ steps.state.outputs.mongodb_persistence }}
+        run: |
+          # Uma senha master por instancia (variavel db_passwords). O jq monta o
+          # JSON com o escape correto, seja qual for o conteudo das senhas.
+          export TF_VAR_db_passwords=$(jq -cn \
+            --arg orders "$DB_PASSWORD_ORDERS" \
+            --arg stock "$DB_PASSWORD_STOCK" \
+            --arg billing "$DB_PASSWORD_BILLING" \
+            '{orders: $orders, stock: $stock, billing: $billing}')
+          terraform plan -input=false -out=tfplan
 
       - name: Terraform apply
         working-directory: ${{ env.TF_DIR }}
@@ -100,28 +157,42 @@ jobs:
         id: tf-outputs
         working-directory: ${{ env.TF_DIR }}
         run: |
-          echo "rds_endpoint=$(terraform output -raw rds_endpoint)" >> $GITHUB_OUTPUT
-          echo "rds_port=$(terraform output -raw rds_port)" >> $GITHUB_OUTPUT
-          echo "rds_db_name=$(terraform output -raw rds_db_name)" >> $GITHUB_OUTPUT
+          echo "databases=$(terraform output -json databases | jq -c .)" >> $GITHUB_OUTPUT
+          echo "auth_database=$(terraform output -json auth_database | jq -c .)" >> $GITHUB_OUTPUT
+          echo "mongodb_host=$(terraform output -raw mongodb_host)" >> $GITHUB_OUTPUT
+          echo "mongodb_port=$(terraform output -raw mongodb_port)" >> $GITHUB_OUTPUT
+          echo "mongodb_replica_set=$(terraform output -raw mongodb_replica_set)" >> $GITHUB_OUTPUT
+          echo "mongodb_database=$(terraform output -raw mongodb_database)" >> $GITHUB_OUTPUT
+          echo "mongodb_secret_name=$(terraform output -raw mongodb_secret_name)" >> $GITHUB_OUTPUT
           echo "eks_cluster_name=$(terraform output -raw eks_cluster_name)" >> $GITHUB_OUTPUT
 
       - name: Resumo
         working-directory: ${{ env.TF_DIR }}
         run: |
           {
-            echo "### Banco provisionado"
+            echo "### Bancos provisionados"
             echo ""
-            echo "| Output | Valor |"
+            echo "| Servico | Endpoint | Porta | Banco | Usuario da aplicacao |"
+            echo "| --- | --- | --- | --- | --- |"
+            terraform output -json databases \
+              | jq -r 'to_entries[] | "| \(.key) | `\(.value.endpoint)` | \(.value.port) | `\(.value.db_name)` | `\(.value.app_username)` |"'
+            echo ""
+            echo "auth_database: \`$(terraform output -json auth_database | jq -r '"\(.endpoint):\(.port)/\(.db_name)"')\`"
+            echo ""
+            echo "| MongoDB | Valor |"
             echo "| --- | --- |"
-            echo "| rds_endpoint | \`$(terraform output -raw rds_endpoint)\` |"
-            echo "| rds_port | \`$(terraform output -raw rds_port)\` |"
-            echo "| rds_db_name | \`$(terraform output -raw rds_db_name)\` |"
+            echo "| mongodb_host | \`$(terraform output -raw mongodb_host)\` |"
+            echo "| mongodb_port | \`$(terraform output -raw mongodb_port)\` |"
+            echo "| mongodb_replica_set | \`$(terraform output -raw mongodb_replica_set)\` |"
+            echo "| mongodb_database | \`$(terraform output -raw mongodb_database)\` |"
+            echo "| mongodb_secret_name | \`$(terraform output -raw mongodb_namespace)/$(terraform output -raw mongodb_secret_name)\` |"
             echo ""
             echo "State: \`s3://${{ steps.state.outputs.bucket }}/mechanical-hub-database/terraform.tfstate\`"
             echo ""
-            echo "Consumidores (ADR-0002): \`mechanical-hub-auth\` e o pipeline de deploy de \`mechanical-hub\`."
+            echo "Consumidores (ADR-0002): pipelines de \`orders\`, \`stock\`, \`billing\` e \`orchestrator\`, e \`mechanical-hub-auth\`."
+            echo ""
+            echo "Proximo passo no primeiro apply: Run workflow com \`criar_usuarios_e_role\` antes do deploy dos servicos."
           } >> $GITHUB_STEP_SUMMARY
-
 
   # ===========================================================================
   # Usuarios dos servicos e role de autenticacao — opcional, sob demanda
@@ -149,7 +220,7 @@ jobs:
     name: Criar usuarios dos servicos e role de autenticacao
     runs-on: ubuntu-latest
     needs: deploy
-    if: github.event_name == 'workflow_dispatch' && inputs.criar_role_de_autenticacao
+    if: github.event_name == 'workflow_dispatch' && inputs.criar_usuarios_e_role
 
     env:
       NAMESPACE: mechanical-hub-db-jobs
