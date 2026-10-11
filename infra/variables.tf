@@ -185,3 +185,59 @@ variable "db_apply_immediately" {
   type        = bool
   default     = false
 }
+
+# ── Cluster EKS (MongoDB) — overrides do remote state ────────────────────────
+
+variable "eks_cluster_name" {
+  description = "Override do nome do cluster EKS. Tem precedencia sobre o remote state."
+  type        = string
+  default     = ""
+}
+
+variable "eks_cluster_endpoint" {
+  description = "Override do endpoint do API server do EKS."
+  type        = string
+  default     = ""
+}
+
+variable "eks_cluster_ca_certificate" {
+  description = "Override da CA do cluster EKS, em base64 (como o output do mechanical-hub-infra)."
+  type        = string
+  default     = ""
+}
+
+# ── MongoDB ──────────────────────────────────────────────────────────────────
+
+variable "mongodb_namespace" {
+  description = "Namespace do MongoDB do orchestrator."
+  type        = string
+  default     = "mongodb"
+}
+
+variable "mongodb_database" {
+  description = "Banco do orchestrator no MongoDB."
+  type        = string
+  default     = "mechanical_hub_orchestrator"
+}
+
+variable "mongodb_persistence_enabled" {
+  description = <<-EOT
+    true: dados em PVC na StorageClass gp3 do mechanical-hub-infra (EBS CSI).
+    false: emptyDir — use se o teste do driver EBS CSI falhar no Lab. Os dados
+    somem quando o pod muda de no; o proximo apply recria replica set e usuario.
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "mongodb_storage_class_name" {
+  description = "Override da StorageClass do PVC. Vazio usa o output storage_class_name do mechanical-hub-infra."
+  type        = string
+  default     = ""
+}
+
+variable "mongodb_storage_size" {
+  description = "Tamanho do volume de dados do MongoDB."
+  type        = string
+  default     = "5Gi"
+}

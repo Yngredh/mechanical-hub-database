@@ -153,3 +153,83 @@ module "rds" {
     terraform_data.db_passwords_precondition,
   ]
 }
+
+# =============================================================================
+# MongoDB do orchestrator — StatefulSet no EKS do mechanical-hub-infra
+# =============================================================================
+#
+# Cluster e StorageClass vem do state do mechanical-hub-infra (contrato:
+# eks_cluster_name, eks_cluster_endpoint, eks_cluster_ca_certificate e
+# storage_class_name). Os overrides seguem a mesma regra da rede: tem
+# precedencia sobre o remote state.
+
+locals {
+  eks_cluster_name = try(coalesce(
+    var.eks_cluster_name != "" ? var.eks_cluster_name : null,
+    try(local.infra_outputs.eks_cluster_name, null),
+  ), "")
+
+  eks_cluster_endpoint = try(coalesce(
+    var.eks_cluster_endpoint != "" ? var.eks_cluster_endpoint : null,
+    try(local.infra_outputs.eks_cluster_endpoint, null),
+  ), "")
+
+  eks_cluster_ca_certificate = try(coalesce(
+    var.eks_cluster_ca_certificate != "" ? var.eks_cluster_ca_certificate : null,
+    try(local.infra_outputs.eks_cluster_ca_certificate, null),
+  ), "")
+
+  # Nulo no infra quando o driver EBS CSI esta desligado; nesse caso a
+  # persistencia tem de ser desligada (mongodb_persistence_enabled = false).
+  mongodb_storage_class_name = try(coalesce(
+    var.mongodb_storage_class_name != "" ? var.mongodb_storage_class_name : null,
+    try(local.infra_outputs.storage_class_name, null),
+  ), "")
+}
+
+resource "terraform_data" "cluster_precondition" {
+  lifecycle {
+    precondition {
+      condition     = local.eks_cluster_name != "" && local.eks_cluster_endpoint != "" && local.eks_cluster_ca_certificate != ""
+      error_message = <<-EOT
+        Nao foi possivel resolver o cluster EKS onde roda o MongoDB.
+
+        Aplique o mechanical-hub-infra primeiro e informe o state dele:
+          -var="infra_state_bucket=mechanical-hub-tfstate-<conta>"
+
+        Ou passe eks_cluster_name, eks_cluster_endpoint e
+        eks_cluster_ca_certificate diretamente.
+      EOT
+    }
+
+    precondition {
+      condition     = !var.mongodb_persistence_enabled || local.mongodb_storage_class_name != ""
+      error_message = <<-EOT
+        mongodb_persistence_enabled = true, mas nenhuma StorageClass foi
+        resolvida (output storage_class_name do mechanical-hub-infra vazio).
+
+        Ligue o driver EBS CSI no mechanical-hub-infra, informe
+        mongodb_storage_class_name, ou rode com
+        -var="mongodb_persistence_enabled=false" (emptyDir).
+      EOT
+    }
+  }
+}
+
+module "mongodb" {
+  source = "./modules/mongodb"
+
+  namespace = var.mongodb_namespace
+  database  = var.mongodb_database
+
+  persistence_enabled = var.mongodb_persistence_enabled
+  storage_class_name  = local.mongodb_storage_class_name == "" ? null : local.mongodb_storage_class_name
+  storage_size        = var.mongodb_storage_size
+
+  labels = {
+    "mechanical-hub/project"     = var.project
+    "mechanical-hub/environment" = var.environment
+  }
+
+  depends_on = [terraform_data.cluster_precondition]
+}

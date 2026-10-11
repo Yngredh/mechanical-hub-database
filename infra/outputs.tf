@@ -7,6 +7,9 @@
 # Consumidores:
 #   - mechanical-hub-orders, -stock, -billing (pipelines) : databases
 #   - mechanical-hub-auth                                 : auth_database
+#   - mechanical-hub-orchestrator (pipeline)              : mongodb_host, mongodb_port,
+#                                                           mongodb_replica_set, mongodb_database,
+#                                                           mongodb_secret_name
 #   - diagnostico                                         : rds_security_group_ids
 # =============================================================================
 
@@ -41,6 +44,40 @@ output "rds_security_group_ids" {
   value       = { for service, rds in module.rds : service => rds.security_group_id }
 }
 
+# ── MongoDB do orchestrator ──────────────────────────────────────────────────
+# O orchestrator monta a URI com estes valores; usuario e senha ficam so no
+# Secret mongodb_secret_name (namespace mongodb_namespace).
+
+output "mongodb_host" {
+  description = "Host DNS estavel do pod do MongoDB (<sts>-0.<svc>.<ns>.svc.cluster.local)."
+  value       = module.mongodb.host
+}
+
+output "mongodb_port" {
+  description = "Porta do MongoDB."
+  value       = module.mongodb.port
+}
+
+output "mongodb_replica_set" {
+  description = "Nome do replica set (parametro replicaSet da URI)."
+  value       = module.mongodb.replica_set
+}
+
+output "mongodb_database" {
+  description = "Banco do orchestrator, tambem o authSource do usuario dele."
+  value       = module.mongodb.database
+}
+
+output "mongodb_secret_name" {
+  description = "Secret com as chaves username e password do orchestrator."
+  value       = module.mongodb.secret_name
+}
+
+output "mongodb_namespace" {
+  description = "Namespace onde estao o MongoDB e o Secret mongodb_secret_name."
+  value       = module.mongodb.namespace
+}
+
 # ── Uso interno da pipeline deste repositorio ────────────────────────────────
 
 output "rds_master_usernames" {
@@ -62,5 +99,5 @@ output "private_subnet_ids" {
 
 output "eks_cluster_name" {
   description = "Nome do cluster EKS (state do mechanical-hub-infra), usado para rodar os scripts de sql/ via Job no cluster."
-  value       = try(local.infra_outputs.eks_cluster_name, null)
+  value       = local.eks_cluster_name == "" ? null : local.eks_cluster_name
 }
