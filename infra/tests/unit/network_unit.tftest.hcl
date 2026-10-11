@@ -10,7 +10,7 @@
 mock_provider "aws" {}
 
 variables {
-  db_password = "placeholder-password"
+  db_passwords = { orders = "placeholder", stock = "placeholder", billing = "placeholder" }
 }
 
 # ── Caminhos de erro ─────────────────────────────────────────────────────────

@@ -32,7 +32,7 @@ run "setup_network" {
   command = apply
 
   module {
-    source = "../fixtures/network"
+    source = "./tests/fixtures/network"
   }
 
   variables {
@@ -53,12 +53,13 @@ run "rds_instance_is_created" {
   command = apply
 
   module {
-    source = "../../modules/rds"
+    source = "./modules/rds"
   }
 
   variables {
     project              = "mhub-test"
     environment          = "test"
+    service              = "orders"
     vpc_id               = run.setup_network.vpc_id
     private_subnet_ids   = run.setup_network.private_subnet_ids
     private_subnet_cidrs = run.setup_network.private_subnet_cidrs
@@ -91,8 +92,8 @@ run "rds_instance_is_created" {
   }
 
   assert {
-    condition     = output.subnet_group_name == "mhub-test-test-db-subnet-group"
-    error_message = "O DB subnet group nao segue o padrao <project>-<environment>-db-subnet-group."
+    condition     = output.subnet_group_name == "mhub-test-orders-test-db-subnet-group"
+    error_message = "O DB subnet group nao segue o padrao <project>-<service>-<environment>-db-subnet-group."
   }
 }
 
@@ -101,12 +102,13 @@ run "ingress_rules_match_private_cidrs" {
   command = apply
 
   module {
-    source = "../../modules/rds"
+    source = "./modules/rds"
   }
 
   variables {
     project              = "mhub-test"
     environment          = "test"
+    service              = "orders"
     vpc_id               = run.setup_network.vpc_id
     private_subnet_ids   = run.setup_network.private_subnet_ids
     private_subnet_cidrs = run.setup_network.private_subnet_cidrs

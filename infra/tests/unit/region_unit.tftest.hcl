@@ -9,7 +9,7 @@ mock_provider "aws" {}
 # Rede resolvida por override para que o plan chegue ate a validacao da regiao
 # sem esbarrar antes na precondicao de rede.
 variables {
-  db_password          = "placeholder-password"
+  db_passwords         = { orders = "placeholder", stock = "placeholder", billing = "placeholder" }
   vpc_id               = "vpc-mock00001"
   private_subnet_ids   = ["subnet-mock0001", "subnet-mock0002"]
   private_subnet_cidrs = ["10.0.11.0/24", "10.0.12.0/24"]

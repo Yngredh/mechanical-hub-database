@@ -89,14 +89,42 @@ resource "terraform_data" "network_precondition" {
 }
 
 # =============================================================================
-# Banco de dados
+# Bancos de dados — uma instancia RDS por servico SQL (ADR-0004)
 # =============================================================================
+#
+# Cada servico (orders, stock, billing) tem instancia, security group e subnet
+# group proprios; nenhum servico alcanca o banco de outro por credencial. A
+# instancia do `orders` assume o papel do antigo banco do monolito e tambem
+# hospeda a role `mechanical_hub_auth` (output auth_database).
+
+resource "terraform_data" "db_passwords_precondition" {
+  lifecycle {
+    precondition {
+      # So o resultado booleano deixa de ser sensivel; as senhas nao aparecem.
+      condition = nonsensitive(alltrue([
+        for service in keys(var.databases) :
+        length(lookup(var.db_passwords, service, "")) > 0
+      ]))
+      error_message = <<-EOT
+        Falta a senha master de ao menos um servico em db_passwords.
+
+        Informe uma senha por chave de `databases`, por exemplo:
+          TF_VAR_db_passwords='{"orders":"...","stock":"...","billing":"..."}'
+
+        No pipeline elas vem dos secrets DB_PASSWORD_ORDERS, DB_PASSWORD_STOCK e
+        DB_PASSWORD_BILLING.
+      EOT
+    }
+  }
+}
 
 module "rds" {
-  source = "./modules/rds"
+  source   = "./modules/rds"
+  for_each = var.databases
 
   project     = var.project
   environment = var.environment
+  service     = each.key
 
   vpc_id                     = local.vpc_id
   private_subnet_ids         = local.private_subnet_ids
@@ -104,12 +132,12 @@ module "rds" {
   allowed_security_group_ids = var.allowed_security_group_ids
 
   engine_version    = var.db_engine_version
-  db_instance_class = var.db_instance_class
-  db_name           = var.db_name
-  db_username       = var.db_username
-  db_password       = var.db_password
+  db_instance_class = each.value.instance_class
+  db_name           = each.value.db_name
+  db_username       = each.value.db_username
+  db_password       = lookup(var.db_passwords, each.key, "")
   db_port           = var.db_port
-  allocated_storage = var.db_allocated_storage
+  allocated_storage = each.value.allocated_storage
 
   storage_encrypted       = var.db_storage_encrypted
   multi_az                = var.db_multi_az
@@ -120,5 +148,8 @@ module "rds" {
 
   tags = local.common_tags
 
-  depends_on = [terraform_data.network_precondition]
+  depends_on = [
+    terraform_data.network_precondition,
+    terraform_data.db_passwords_precondition,
+  ]
 }

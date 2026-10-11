@@ -86,40 +86,68 @@ variable "db_engine_version" {
   default     = "16"
 }
 
-variable "db_instance_class" {
-  description = "Classe da instancia RDS."
-  type        = string
-  default     = "db.t3.micro"
+variable "databases" {
+  description = <<-EOT
+    Uma instancia RDS por servico SQL (ADR-0004), indexada pelo nome do servico.
+
+      db_name           : banco criado na instancia
+      db_username       : usuario master (so para administracao e scripts sql/)
+      app_username      : usuario da aplicacao, criado por sql/service-user.sql
+      instance_class    : classe da instancia
+      allocated_storage : armazenamento em GB
+
+    A chave `orders` e obrigatoria: a instancia dela tambem atende a
+    autenticacao (output auth_database).
+  EOT
+  type = map(object({
+    db_name           = string
+    db_username       = optional(string, "mechanical_hub_admin")
+    app_username      = string
+    instance_class    = optional(string, "db.t3.micro")
+    allocated_storage = optional(number, 20)
+  }))
+
+  default = {
+    orders = {
+      db_name      = "mechanical_hub_orders"
+      app_username = "orders_app"
+    }
+    stock = {
+      db_name      = "mechanical_hub_stock"
+      app_username = "stock_app"
+    }
+    billing = {
+      db_name      = "mechanical_hub_billing"
+      app_username = "billing_app"
+    }
+  }
+
+  validation {
+    condition     = contains(keys(var.databases), "orders")
+    error_message = "databases precisa da chave \"orders\": e a instancia apontada por auth_database."
+  }
+
+  validation {
+    condition     = alltrue([for k in keys(var.databases) : can(regex("^[a-z][a-z0-9-]*$", k))])
+    error_message = "As chaves de databases (nomes dos servicos) devem conter apenas letras minusculas, digitos e hifen."
+  }
 }
 
-variable "db_name" {
-  description = "Nome do banco PostgreSQL."
-  type        = string
-  default     = "mechanical_hub"
-}
-
-variable "db_username" {
-  description = "Usuario master da instancia RDS."
-  type        = string
-  default     = "mechanical_hub"
-}
-
-variable "db_password" {
-  description = "Senha do usuario master. Injetada no CI via TF_VAR_db_password."
-  type        = string
+variable "db_passwords" {
+  description = <<-EOT
+    Senha master de cada instancia, indexada pela mesma chave de `databases`.
+    No pipeline vem dos secrets DB_PASSWORD_ORDERS, DB_PASSWORD_STOCK e
+    DB_PASSWORD_BILLING, via TF_VAR_db_passwords (JSON).
+  EOT
+  type        = map(string)
   sensitive   = true
+  default     = {}
 }
 
 variable "db_port" {
   description = "Porta do banco."
   type        = number
   default     = 5432
-}
-
-variable "db_allocated_storage" {
-  description = "Armazenamento alocado em GB."
-  type        = number
-  default     = 20
 }
 
 variable "db_storage_encrypted" {
