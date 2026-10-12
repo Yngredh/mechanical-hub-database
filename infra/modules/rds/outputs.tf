@@ -42,3 +42,18 @@ output "subnet_group_name" {
   description = "Nome do DB subnet group."
   value       = aws_db_subnet_group.this.name
 }
+
+output "publicly_accessible" {
+  description = "Se a instancia aceita conexao publica. Sempre false (ADR-0002); exposto para os testes do modulo raiz."
+  value       = aws_db_instance.this.publicly_accessible
+}
+
+output "ingress_cidr_blocks" {
+  description = "CIDRs com regra de ingress na porta do banco, ja aplicadas ao security group."
+  value       = sort([for rule in aws_security_group_rule.postgres_from_private_subnets : one(rule.cidr_blocks)])
+}
+
+output "ingress_security_group_ids" {
+  description = "Security groups com regra de ingress na porta do banco."
+  value       = sort([for rule in aws_security_group_rule.postgres_from_security_groups : rule.source_security_group_id])
+}

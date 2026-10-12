@@ -1,5 +1,7 @@
 locals {
-  name_prefix = "${var.project}-${var.environment}"
+  # Uma instancia por servico (ADR-0004): o nome do servico entra em todos os
+  # recursos para que as instancias convivam na mesma conta e VPC.
+  name_prefix = "${var.project}-${var.service}-${var.environment}"
 }
 
 # ── DB Subnet Group ───────────────────────────────────────────────────────────
@@ -22,7 +24,7 @@ resource "aws_db_subnet_group" "this" {
 
 resource "aws_security_group" "rds" {
   name        = "${local.name_prefix}-rds-sg"
-  description = "Allow PostgreSQL access from workloads in the private subnets"
+  description = "Allow PostgreSQL access to ${var.service} from workloads in the private subnets"
   vpc_id      = var.vpc_id
 
   egress {
@@ -66,7 +68,7 @@ resource "aws_security_group_rule" "postgres_from_security_groups" {
 # ── RDS Instance ──────────────────────────────────────────────────────────────
 
 resource "aws_db_instance" "this" {
-  identifier        = "${local.name_prefix}-postgres"
+  identifier        = local.name_prefix
   engine            = "postgres"
   engine_version    = var.engine_version
   instance_class    = var.db_instance_class
@@ -91,5 +93,5 @@ resource "aws_db_instance" "this" {
 
   apply_immediately = var.apply_immediately
 
-  tags = merge(var.tags, { Name = "${local.name_prefix}-postgres" })
+  tags = merge(var.tags, { Name = local.name_prefix, Service = var.service })
 }

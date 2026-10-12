@@ -5,53 +5,84 @@
 # uma mudanca quebra-compatibilidade e exige coordenacao com os consumidores.
 #
 # Consumidores:
-#   - mechanical-hub-auth : rds_endpoint, rds_port, rds_db_name
-#   - mechanical-hub (CI)  : rds_endpoint, rds_port, rds_db_name
+#   - mechanical-hub-orders, -stock, -billing (pipelines) : databases
+#   - mechanical-hub-auth                                 : auth_database
+#   - mechanical-hub-orchestrator (pipeline)              : mongodb_host, mongodb_port,
+#                                                           mongodb_replica_set, mongodb_database,
+#                                                           mongodb_secret_name
+#   - diagnostico                                         : rds_security_group_ids
 # =============================================================================
 
-output "rds_endpoint" {
-  description = "Hostname da instancia RDS. Usado como DB_HOST/DATABASE_HOST pelos consumidores."
-  value       = module.rds.endpoint
+output "databases" {
+  description = <<-EOT
+    Uma entrada por servico SQL (orders, stock, billing) com endpoint (host,
+    sem porta), port, db_name e app_username. Substitui os antigos rds_*.
+    A senha do usuario da aplicacao nao sai daqui: fica no secret
+    <SERVICO>_DB_APP_PASSWORD de cada repositorio.
+  EOT
+  value = {
+    for service, rds in module.rds : service => {
+      endpoint     = rds.endpoint
+      port         = rds.port
+      db_name      = rds.db_name
+      app_username = var.databases[service].app_username
+    }
+  }
 }
 
-output "rds_endpoint_with_port" {
-  description = "Endpoint completo no formato host:porta."
-  value       = module.rds.endpoint_with_port
+output "auth_database" {
+  description = "Banco consultado pela autenticacao: a instancia do orders, onde vivem users/profiles e a role mechanical_hub_auth."
+  value = {
+    endpoint = module.rds["orders"].endpoint
+    port     = module.rds["orders"].port
+    db_name  = module.rds["orders"].db_name
+  }
 }
 
-output "rds_port" {
-  description = "Porta do banco."
-  value       = module.rds.port
+output "rds_security_group_ids" {
+  description = "Security group de cada instancia, por servico."
+  value       = { for service, rds in module.rds : service => rds.security_group_id }
 }
 
-output "rds_db_name" {
-  description = "Nome do banco PostgreSQL."
-  value       = module.rds.db_name
+# ── MongoDB do orchestrator ──────────────────────────────────────────────────
+# O orchestrator monta a URI com estes valores; usuario e senha ficam so no
+# Secret mongodb_secret_name (namespace mongodb_namespace).
+
+output "mongodb_host" {
+  description = "Host DNS estavel do pod do MongoDB (<sts>-0.<svc>.<ns>.svc.cluster.local)."
+  value       = module.mongodb.host
 }
 
-output "rds_username" {
-  description = "Usuario master. As aplicacoes devem usar roles dedicadas, nao este usuario."
-  value       = module.rds.db_username
+output "mongodb_port" {
+  description = "Porta do MongoDB."
+  value       = module.mongodb.port
 }
 
-output "rds_identifier" {
-  description = "Identificador da instancia RDS."
-  value       = module.rds.identifier
+output "mongodb_replica_set" {
+  description = "Nome do replica set (parametro replicaSet da URI)."
+  value       = module.mongodb.replica_set
 }
 
-output "rds_arn" {
-  description = "ARN da instancia RDS."
-  value       = module.rds.arn
+output "mongodb_database" {
+  description = "Banco do orchestrator, tambem o authSource do usuario dele."
+  value       = module.mongodb.database
 }
 
-output "rds_security_group_id" {
-  description = "Security group do banco."
-  value       = module.rds.security_group_id
+output "mongodb_secret_name" {
+  description = "Secret com as chaves username e password do orchestrator."
+  value       = module.mongodb.secret_name
 }
 
-output "rds_subnet_group_name" {
-  description = "Nome do DB subnet group."
-  value       = module.rds.subnet_group_name
+output "mongodb_namespace" {
+  description = "Namespace onde estao o MongoDB e o Secret mongodb_secret_name."
+  value       = module.mongodb.namespace
+}
+
+# ── Uso interno da pipeline deste repositorio ────────────────────────────────
+
+output "rds_master_usernames" {
+  description = "Usuario master de cada instancia, por servico. Usado apenas pelo Job que roda os scripts de sql/."
+  value       = { for service, rds in module.rds : service => rds.db_username }
 }
 
 # ── Rede resolvida (util para depurar a leitura do remote state) ─────────────
@@ -62,11 +93,11 @@ output "vpc_id" {
 }
 
 output "private_subnet_ids" {
-  description = "Subnets privadas efetivamente usadas no DB subnet group."
+  description = "Subnets privadas efetivamente usadas nos DB subnet groups."
   value       = local.private_subnet_ids
 }
 
 output "eks_cluster_name" {
-  description = "Nome do cluster EKS (state do mechanical-hub-infra), usado para rodar sql/auth-database-role.sql via Job no cluster."
-  value       = try(local.infra_outputs.eks_cluster_name, null)
+  description = "Nome do cluster EKS (state do mechanical-hub-infra), usado para rodar os scripts de sql/ via Job no cluster."
+  value       = local.eks_cluster_name == "" ? null : local.eks_cluster_name
 }

@@ -8,6 +8,16 @@ variable "environment" {
   type        = string
 }
 
+variable "service" {
+  description = "Servico dono da instancia (orders, stock, billing). Entra no nome de todos os recursos."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]*$", var.service))
+    error_message = "service deve conter apenas letras minusculas, digitos e hifen."
+  }
+}
+
 # ── Rede ──────────────────────────────────────────────────────────────────────
 
 variable "vpc_id" {

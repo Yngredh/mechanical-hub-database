@@ -89,14 +89,42 @@ resource "terraform_data" "network_precondition" {
 }
 
 # =============================================================================
-# Banco de dados
+# Bancos de dados — uma instancia RDS por servico SQL (ADR-0004)
 # =============================================================================
+#
+# Cada servico (orders, stock, billing) tem instancia, security group e subnet
+# group proprios; nenhum servico alcanca o banco de outro por credencial. A
+# instancia do `orders` assume o papel do antigo banco do monolito e tambem
+# hospeda a role `mechanical_hub_auth` (output auth_database).
+
+resource "terraform_data" "db_passwords_precondition" {
+  lifecycle {
+    precondition {
+      # So o resultado booleano deixa de ser sensivel; as senhas nao aparecem.
+      condition = nonsensitive(alltrue([
+        for service in keys(var.databases) :
+        length(lookup(var.db_passwords, service, "")) > 0
+      ]))
+      error_message = <<-EOT
+        Falta a senha master de ao menos um servico em db_passwords.
+
+        Informe uma senha por chave de `databases`, por exemplo:
+          TF_VAR_db_passwords='{"orders":"...","stock":"...","billing":"..."}'
+
+        No pipeline elas vem dos secrets DB_PASSWORD_ORDERS, DB_PASSWORD_STOCK e
+        DB_PASSWORD_BILLING.
+      EOT
+    }
+  }
+}
 
 module "rds" {
-  source = "./modules/rds"
+  source   = "./modules/rds"
+  for_each = var.databases
 
   project     = var.project
   environment = var.environment
+  service     = each.key
 
   vpc_id                     = local.vpc_id
   private_subnet_ids         = local.private_subnet_ids
@@ -104,12 +132,12 @@ module "rds" {
   allowed_security_group_ids = var.allowed_security_group_ids
 
   engine_version    = var.db_engine_version
-  db_instance_class = var.db_instance_class
-  db_name           = var.db_name
-  db_username       = var.db_username
-  db_password       = var.db_password
+  db_instance_class = each.value.instance_class
+  db_name           = each.value.db_name
+  db_username       = each.value.db_username
+  db_password       = lookup(var.db_passwords, each.key, "")
   db_port           = var.db_port
-  allocated_storage = var.db_allocated_storage
+  allocated_storage = each.value.allocated_storage
 
   storage_encrypted       = var.db_storage_encrypted
   multi_az                = var.db_multi_az
@@ -120,5 +148,88 @@ module "rds" {
 
   tags = local.common_tags
 
-  depends_on = [terraform_data.network_precondition]
+  depends_on = [
+    terraform_data.network_precondition,
+    terraform_data.db_passwords_precondition,
+  ]
+}
+
+# =============================================================================
+# MongoDB do orchestrator — StatefulSet no EKS do mechanical-hub-infra
+# =============================================================================
+#
+# Cluster e StorageClass vem do state do mechanical-hub-infra (contrato:
+# eks_cluster_name, eks_cluster_endpoint, eks_cluster_ca_certificate e
+# storage_class_name). Os overrides seguem a mesma regra da rede: tem
+# precedencia sobre o remote state.
+
+locals {
+  eks_cluster_name = try(coalesce(
+    var.eks_cluster_name != "" ? var.eks_cluster_name : null,
+    try(local.infra_outputs.eks_cluster_name, null),
+  ), "")
+
+  eks_cluster_endpoint = try(coalesce(
+    var.eks_cluster_endpoint != "" ? var.eks_cluster_endpoint : null,
+    try(local.infra_outputs.eks_cluster_endpoint, null),
+  ), "")
+
+  eks_cluster_ca_certificate = try(coalesce(
+    var.eks_cluster_ca_certificate != "" ? var.eks_cluster_ca_certificate : null,
+    try(local.infra_outputs.eks_cluster_ca_certificate, null),
+  ), "")
+
+  # Nulo no infra quando o driver EBS CSI esta desligado; nesse caso a
+  # persistencia tem de ser desligada (mongodb_persistence_enabled = false).
+  mongodb_storage_class_name = try(coalesce(
+    var.mongodb_storage_class_name != "" ? var.mongodb_storage_class_name : null,
+    try(local.infra_outputs.storage_class_name, null),
+  ), "")
+}
+
+resource "terraform_data" "cluster_precondition" {
+  lifecycle {
+    precondition {
+      condition     = local.eks_cluster_name != "" && local.eks_cluster_endpoint != "" && local.eks_cluster_ca_certificate != ""
+      error_message = <<-EOT
+        Nao foi possivel resolver o cluster EKS onde roda o MongoDB.
+
+        Aplique o mechanical-hub-infra primeiro e informe o state dele:
+          -var="infra_state_bucket=mechanical-hub-tfstate-<conta>"
+
+        Ou passe eks_cluster_name, eks_cluster_endpoint e
+        eks_cluster_ca_certificate diretamente.
+      EOT
+    }
+
+    precondition {
+      condition     = !var.mongodb_persistence_enabled || local.mongodb_storage_class_name != ""
+      error_message = <<-EOT
+        mongodb_persistence_enabled = true, mas nenhuma StorageClass foi
+        resolvida (output storage_class_name do mechanical-hub-infra vazio).
+
+        Ligue o driver EBS CSI no mechanical-hub-infra, informe
+        mongodb_storage_class_name, ou rode com
+        -var="mongodb_persistence_enabled=false" (emptyDir).
+      EOT
+    }
+  }
+}
+
+module "mongodb" {
+  source = "./modules/mongodb"
+
+  namespace = var.mongodb_namespace
+  database  = var.mongodb_database
+
+  persistence_enabled = var.mongodb_persistence_enabled
+  storage_class_name  = local.mongodb_storage_class_name == "" ? null : local.mongodb_storage_class_name
+  storage_size        = var.mongodb_storage_size
+
+  labels = {
+    "mechanical-hub/project"     = var.project
+    "mechanical-hub/environment" = var.environment
+  }
+
+  depends_on = [terraform_data.cluster_precondition]
 }

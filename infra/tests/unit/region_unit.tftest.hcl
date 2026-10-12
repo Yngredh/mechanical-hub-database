@@ -5,14 +5,22 @@
 #   terraform test -filter=tests/unit/region_unit.tftest.hcl
 
 mock_provider "aws" {}
+mock_provider "kubernetes" {}
+mock_provider "random" {}
 
 # Rede resolvida por override para que o plan chegue ate a validacao da regiao
 # sem esbarrar antes na precondicao de rede.
 variables {
-  db_password          = "placeholder-password"
-  vpc_id               = "vpc-mock00001"
-  private_subnet_ids   = ["subnet-mock0001", "subnet-mock0002"]
-  private_subnet_cidrs = ["10.0.11.0/24", "10.0.12.0/24"]
+  db_passwords = { orders = "placeholder", stock = "placeholder", billing = "placeholder" }
+
+  # Cluster resolvido por override: estes testes cobrem rede e regiao, nao o MongoDB.
+  eks_cluster_name           = "mhub-test"
+  eks_cluster_endpoint       = "https://mock.eks.amazonaws.com"
+  eks_cluster_ca_certificate = "bW9jaw=="
+  mongodb_storage_class_name = "gp3"
+  vpc_id                     = "vpc-mock00001"
+  private_subnet_ids         = ["subnet-mock0001", "subnet-mock0002"]
+  private_subnet_cidrs       = ["10.0.11.0/24", "10.0.12.0/24"]
 }
 
 run "valid_region_us_east_1" {

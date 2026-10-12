@@ -11,8 +11,8 @@
 mock_provider "aws" {
   mock_resource "aws_db_subnet_group" {
     defaults = {
-      id   = "mhub-test-test-db-subnet-group"
-      name = "mhub-test-test-db-subnet-group"
+      id   = "mhub-test-orders-test-db-subnet-group"
+      name = "mhub-test-orders-test-db-subnet-group"
     }
   }
 
@@ -31,10 +31,10 @@ mock_provider "aws" {
 
   mock_resource "aws_db_instance" {
     defaults = {
-      id       = "mhub-test-test-postgres"
-      address  = "mhub-test-test-postgres.mock.us-east-1.rds.amazonaws.com"
-      endpoint = "mhub-test-test-postgres.mock.us-east-1.rds.amazonaws.com:5432"
-      arn      = "arn:aws:rds:us-east-1:123456789012:db:mhub-test-test-postgres"
+      id       = "mhub-test-orders-test"
+      address  = "mhub-test-orders-test.mock.us-east-1.rds.amazonaws.com"
+      endpoint = "mhub-test-orders-test.mock.us-east-1.rds.amazonaws.com:5432"
+      arn      = "arn:aws:rds:us-east-1:123456789012:db:mhub-test-orders-test"
     }
   }
 }
@@ -42,6 +42,7 @@ mock_provider "aws" {
 variables {
   project              = "mhub-test"
   environment          = "test"
+  service              = "orders"
   vpc_id               = "vpc-mock00001"
   private_subnet_ids   = ["subnet-mock0001", "subnet-mock0002"]
   private_subnet_cidrs = ["10.88.11.0/24", "10.88.12.0/24"]
@@ -57,7 +58,7 @@ run "one_ingress_rule_per_private_cidr" {
   command = plan
 
   module {
-    source = "../../modules/rds"
+    source = "./modules/rds"
   }
 
   assert {
@@ -78,7 +79,7 @@ run "no_extra_security_group_rules_by_default" {
   command = plan
 
   module {
-    source = "../../modules/rds"
+    source = "./modules/rds"
   }
 
   # ADR-0002: a liberacao e por CIDR justamente para nao depender do security
@@ -93,7 +94,7 @@ run "extra_security_group_is_allowed_when_informed" {
   command = plan
 
   module {
-    source = "../../modules/rds"
+    source = "./modules/rds"
   }
 
   variables {
@@ -110,7 +111,7 @@ run "instance_is_private_and_encrypted" {
   command = plan
 
   module {
-    source = "../../modules/rds"
+    source = "./modules/rds"
   }
 
   assert {
@@ -138,12 +139,12 @@ run "resource_names_carry_project_and_environment" {
   command = plan
 
   module {
-    source = "../../modules/rds"
+    source = "./modules/rds"
   }
 
   assert {
-    condition     = aws_db_instance.this.identifier == "mhub-test-test-postgres"
-    error_message = "O identifier deveria seguir o padrao <project>-<environment>-postgres."
+    condition     = aws_db_instance.this.identifier == "mhub-test-orders-test"
+    error_message = "O identifier deveria seguir o padrao <project>-<service>-<environment>."
   }
 
   assert {

@@ -8,9 +8,17 @@
 #   terraform test -filter=tests/unit/network_unit.tftest.hcl
 
 mock_provider "aws" {}
+mock_provider "kubernetes" {}
+mock_provider "random" {}
 
 variables {
-  db_password = "placeholder-password"
+  db_passwords = { orders = "placeholder", stock = "placeholder", billing = "placeholder" }
+
+  # Cluster resolvido por override: estes testes cobrem rede e regiao, nao o MongoDB.
+  eks_cluster_name           = "mhub-test"
+  eks_cluster_endpoint       = "https://mock.eks.amazonaws.com"
+  eks_cluster_ca_certificate = "bW9jaw=="
+  mongodb_storage_class_name = "gp3"
 }
 
 # ── Caminhos de erro ─────────────────────────────────────────────────────────
